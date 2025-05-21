@@ -1,0 +1,230 @@
+# routers/quiz.py
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+from typing import List, Dict
+from sqlalchemy.orm import Session
+from sqlalchemy import func
+from database import SessionLocal
+from models import Quiz, QuizQuestion, Question, Option, StudentQuiz, StudentAnswer, AssignedQuiz, QuizStatus
+from datetime import datetime, timezone
+import json
+
+router = APIRouter()
+
+class AnswerSubmission(BaseModel):
+    quiz_id: int
+    student_id: int
+    answers: Dict[int, str]  # question_id: answer (str or JSON string)
+
+@router.post("/submit_quiz")
+def submit_quiz(data: AnswerSubmission):
+    db: Session = SessionLocal()
+
+    existing = db.query(StudentQuiz).filter_by(student_id=data.student_id, quiz_id=data.quiz_id).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Quiz already attempted.")
+
+    now = datetime.now(timezone.utc).isoformat()
+    attempt = StudentQuiz(
+        student_id=data.student_id,
+        quiz_id=data.quiz_id,
+        started_at=now,
+        submitted_at=now,
+        total_score=0
+    )
+    db.add(attempt)
+    db.commit()
+    db.refresh(attempt)
+
+    raw_score = 0
+    max_raw_score = 0
+
+    quiz = db.query(Quiz).filter_by(id=data.quiz_id).first()
+    quiz_questions = db.query(QuizQuestion).filter_by(quiz_id=data.quiz_id).all()
+
+    for qq in quiz_questions:
+        q = db.query(Question).filter_by(id=qq.question_id).first()
+        given = data.answers.get(q.id)
+
+        if given is None:
+            continue
+
+        correct = q.correct_answer
+        is_correct = False
+        marks = qq.mark if qq.mark is not None else 1  # Default mark = 1
+        max_raw_score += marks
+
+        # --- Correctness logic ---
+        if q.question_type == "FILL_BLANK":
+            correct_vals = json.loads(correct or "[]")
+            is_correct = given.strip().lower() in [x.lower() for x in correct_vals]
+        elif q.question_type == "TRUE_FALSE":
+            is_correct = given.strip().lower() == (correct or "").strip().lower()
+        elif q.question_type == "MULTI_SELECT":
+            try:
+                given_set = set(json.loads(given))
+            except:
+                given_set = set()
+            correct_set = set(o.text for o in db.query(Option).filter_by(question_id=q.id, is_correct=True))
+            is_correct = given_set == correct_set
+        elif q.question_type == "MCQ":
+            correct_option = db.query(Option).filter_by(question_id=q.id, is_correct=True).first()
+            is_correct = (given == correct_option.text if correct_option else False)
+
+        awarded = marks if is_correct else 0
+        raw_score += awarded
+
+        ans = StudentAnswer(
+            student_quiz_id=attempt.id,
+            question_id=q.id,
+            given_answer=given,
+            is_correct=is_correct,
+            marks_awarded=awarded
+        )
+        db.add(ans)
+
+    # Scale score to quiz.total_marks
+    scaled_score = round((raw_score / max_raw_score) * quiz.total_marks, 2) if max_raw_score > 0 else 0
+
+    attempt.total_score = scaled_score
+    db.commit()
+    db.close()
+
+    return {
+        "message": "Quiz submitted!",
+        "score": scaled_score
+    }
+
+
+@router.get("/list/{student_id}")
+def list_quizzes(student_id: int):
+    db: Session = SessionLocal()
+    now = datetime.utcnow().isoformat()
+
+    assigned_ids = db.query(AssignedQuiz.quiz_id).filter_by(student_id=student_id).subquery()
+    quizzes = db.query(Quiz).filter(Quiz.id.in_(assigned_ids), Quiz.is_active == True).all()
+
+    active, upcoming, completed = [], [], []
+
+    for quiz in quizzes:
+        attempted = db.query(StudentQuiz).filter_by(student_id=student_id, quiz_id=quiz.id).first()
+
+        item = {
+            "quiz_id": quiz.id,
+            "title": quiz.title,
+            "start_time": quiz.start_time,
+            "duration_minutes": quiz.duration_minutes,
+            "total_marks": quiz.total_marks,
+            "attempted": attempted is not None,
+            "score": attempted.total_score if attempted else None,
+            "status": quiz.status
+        }
+
+        if attempted:
+            if quiz.status == QuizStatus.COMPLETED:
+                scores = db.query(StudentQuiz).filter_by(quiz_id=quiz.id).order_by(StudentQuiz.total_score.desc()).all()
+                rank = next((i+1 for i, s in enumerate(scores) if s.student_id == student_id), None)
+                item["position"] = rank
+                print(f"Student {student_id} rank for quiz {quiz.id}: {rank}")
+            completed.append(item)
+        elif quiz.start_time > now:
+            upcoming.append(item)
+        else:
+            active.append(item)
+
+    db.close()
+    return {
+        "active": active,
+        "upcoming": upcoming,
+        "completed": completed
+    }
+
+@router.get("/quiz/{quiz_id}/questions")
+def get_quiz_questions(quiz_id: int):
+    db: Session = SessionLocal()
+    quiz = db.query(Quiz).filter_by(id=quiz_id, is_active=True).first()
+    if not quiz:
+        db.close()
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    questions_data = []
+    quiz_questions = db.query(QuizQuestion).filter_by(quiz_id=quiz_id).all()
+
+    for qq in quiz_questions:
+        q = db.query(Question).filter_by(id=qq.question_id).first()
+        options = []
+        if q.question_type in ["MCQ", "MULTI_SELECT", "TRUE_FALSE"]:
+            opts = db.query(Option).filter_by(question_id=q.id).all()
+            options = [{"text": o.text} for o in opts]
+
+        questions_data.append({
+            "question_id": q.id,
+            "question_text": q.question_text,
+            "question_type": q.question_type,
+            "options": options
+        })
+
+    db.close()
+    return {
+        "quiz_id": quiz_id,
+        "title": quiz.title,
+        "duration_minutes": quiz.duration_minutes,
+        "total_marks": quiz.total_marks,
+        "questions": questions_data
+    }
+
+@router.get("/quiz/{quiz_id}/summary/{student_id}")
+def get_quiz_summary(quiz_id: int, student_id: int):
+    db: Session = SessionLocal()
+    quiz = db.query(Quiz).filter_by(id=quiz_id).first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+    attempt = db.query(StudentQuiz).filter_by(quiz_id=quiz_id, student_id=student_id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+
+    total_attempts = db.query(StudentQuiz).filter_by(quiz_id=quiz_id).count()
+    scores = [s.total_score for s in db.query(StudentQuiz).filter_by(quiz_id=quiz_id).all()]
+    average = sum(scores) / len(scores) if scores else 0
+    median = sorted(scores)[len(scores)//2] if scores else 0
+
+    answers = (
+        db.query(StudentAnswer, Question)
+        .join(Question, StudentAnswer.question_id == Question.id)
+        .filter(StudentAnswer.student_quiz_id == attempt.id)
+        .all()
+    )
+
+    answer_list = []
+
+    for a, q in answers:
+        correct = None
+        if q.question_type in ["MCQ", "MULTI_SELECT"]:
+            opts = db.query(Option).filter_by(question_id=q.id, is_correct=True).all()
+            correct = [o.text for o in opts]
+            if q.question_type == "MCQ" and correct:
+                correct = correct[0]
+        elif q.question_type == "TRUE_FALSE":
+            correct = q.correct_answer
+        elif q.question_type == "FILL_BLANK":
+            correct_vals = json.loads(q.correct_answer or "[]")
+            correct = ", ".join(correct_vals)
+
+        answer_list.append({
+            "question": q.question_text,
+            "correct_answer": correct,
+            "your_answer": a.given_answer,
+            "is_correct": a.is_correct
+        })
+
+    db.close()
+    return {
+        "quiz_title": quiz.title,
+        "total_marks": quiz.total_marks,
+        "your_score": attempt.total_score,
+        "students_attended": total_attempts,
+        "average_marks": round(average, 2),
+        "median_marks": median,
+        "answers": answer_list
+    }
