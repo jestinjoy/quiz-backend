@@ -125,7 +125,7 @@ def list_quizzes(student_id: int):
                 scores = db.query(StudentQuiz).filter_by(quiz_id=quiz.id).order_by(StudentQuiz.total_score.desc()).all()
                 rank = next((i+1 for i, s in enumerate(scores) if s.student_id == student_id), None)
                 item["position"] = rank
-                print(f"Student {student_id} rank for quiz {quiz.id}: {rank}")
+                #print(f"Student {student_id} rank for quiz {quiz.id}: {rank}")
             completed.append(item)
         elif quiz.start_time > now:
             upcoming.append(item)
