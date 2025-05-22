@@ -19,12 +19,13 @@ class QuestionCreateSchema(BaseModel):
 class QuizCreateSchema(BaseModel):
     title: str
     duration_minutes: int
-    total_marks: int
+    total_marks: Optional[int] = None
     start_time: str
-    created_at: str
-    created_by: int
     is_active: bool
-    status: Optional[str] = "ACTIVE"
+    status: str
+    created_by: int
+    created_at: str
+    random_order: Optional[bool] = False  # ✅ NEW FIELD
     
 class AssignQuestionsSchema(BaseModel):
     quiz_id: int

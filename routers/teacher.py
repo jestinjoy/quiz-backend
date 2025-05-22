@@ -75,24 +75,23 @@ def get_all_questions(
 
 @router.post("/create_quiz")
 def create_quiz(data: QuizCreateSchema, db: Session = Depends(get_db)):
-    # Validate status or assign default
-    status = "ACTIVE"
-
     quiz = Quiz(
         title=data.title,
         duration_minutes=data.duration_minutes,
         total_marks=data.total_marks,
         start_time=data.start_time,
         is_active=data.is_active,
-        status=status,
+        status=data.status,
         created_by=data.created_by,
-        created_at=data.created_at
+        created_at=data.created_at,
+        random_order=data.random_order  # ✅ include in model
     )
 
     db.add(quiz)
     db.commit()
     db.refresh(quiz)
     return {"id": quiz.id, "title": quiz.title}
+
 
 @router.post("/assign_questions")
 def assign_questions(data: dict, db: Session = Depends(get_db)):

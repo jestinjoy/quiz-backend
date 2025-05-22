@@ -1,15 +1,18 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Text, Boolean
+from sqlalchemy import Column, Integer, String, ForeignKey, Text, Boolean, Enum as SqlEnum
 from sqlalchemy.orm import relationship
-from database import Base  # ✅ correct import
-from sqlalchemy import Enum
+from database import Base
 import enum
+
+class QuizStatus(enum.Enum):
+    ACTIVE = "ACTIVE"
+    COMPLETED = "COMPLETED"
 
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False)
-    password = Column(String, nullable=False)  # Plain for now
+    password = Column(String, nullable=False)
     role = Column(String, nullable=False)  # 'student' or 'teacher'
     college = Column(String, nullable=True)
     batch = Column(String, nullable=True)
@@ -33,9 +36,9 @@ class Question(Base):
     __tablename__ = "questions"
     id = Column(Integer, primary_key=True, index=True)
     question_text = Column(Text, nullable=False)
-    question_type = Column(String, nullable=False)
+    question_type = Column(String, nullable=False)  # 'MCQ', 'MULTI_SELECT', 'FILL_BLANK', 'TRUE_FALSE'
     correct_answer = Column(Text)
-    feedback = Column(Text, nullable=True)  # ✅ Feedback description
+    feedback = Column(Text, nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(String, nullable=False)  # ISO datetime string
     is_active = Column(Boolean, default=True)
@@ -51,11 +54,6 @@ class Option(Base):
     question_id = Column(Integer, ForeignKey("questions.id"))
     question = relationship("Question", back_populates="options")
 
-class QuizStatus(enum.Enum):
-    ACTIVE = "ACTIVE"
-    COMPLETED = "COMPLETED"
-
-
 class Quiz(Base):
     __tablename__ = "quizzes"
     id = Column(Integer, primary_key=True, index=True)
@@ -63,11 +61,12 @@ class Quiz(Base):
     total_marks = Column(Integer, nullable=True)
     duration_minutes = Column(Integer, nullable=False)
     created_by = Column(Integer, ForeignKey("users.id"))
-    created_at = Column(String, nullable=False)  # ISO timestamp string
-    start_time = Column(String, nullable=True)  # Scheduled start
+    created_at = Column(String, nullable=False)
+    start_time = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
+    status = Column(SqlEnum(QuizStatus), default=QuizStatus.ACTIVE)
+    random_order = Column(Boolean, default=False)
     questions = relationship("QuizQuestion", back_populates="quiz")
-    status = Column(Enum(QuizStatus), default=QuizStatus.ACTIVE)
 
 class QuizQuestion(Base):
     __tablename__ = "quiz_questions"
@@ -93,6 +92,7 @@ class StudentQuiz(Base):
     submitted_at = Column(String, nullable=True)
     total_score = Column(Integer, default=0)
     answers = relationship("StudentAnswer", back_populates="attempt")
+    question_order = relationship("StudentQuizQuestionOrder", back_populates="student_quiz")
 
 class StudentAnswer(Base):
     __tablename__ = "student_answers"
@@ -104,3 +104,12 @@ class StudentAnswer(Base):
     marks_awarded = Column(Integer, default=0)
     attempt = relationship("StudentQuiz", back_populates="answers")
 
+class StudentQuizQuestionOrder(Base):
+    __tablename__ = "student_quiz_question_order"
+    id = Column(Integer, primary_key=True, index=True)
+    student_quiz_id = Column(Integer, ForeignKey("student_quizzes.id"))
+    question_id = Column(Integer, ForeignKey("questions.id"))
+    position = Column(Integer)  # 0-based index
+
+    student_quiz = relationship("StudentQuiz", back_populates="question_order")
+    question = relationship("Question")

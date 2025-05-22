@@ -5,10 +5,11 @@ from typing import List, Dict
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import SessionLocal
-from models import User, Quiz, QuizQuestion, Question, Option, StudentQuiz, StudentAnswer, AssignedQuiz, QuizStatus
+from models import User, Quiz, QuizQuestion, Question, Option, StudentQuiz, StudentAnswer, AssignedQuiz, QuizStatus, StudentQuizQuestionOrder
 from datetime import datetime, timezone
 from schemas.quiz_schemas import LoginData
 import json
+import random
 
 router = APIRouter()
 
@@ -21,30 +22,25 @@ class AnswerSubmission(BaseModel):
 def submit_quiz(data: AnswerSubmission):
     db: Session = SessionLocal()
 
-    existing = db.query(StudentQuiz).filter_by(student_id=data.student_id, quiz_id=data.quiz_id).first()
-    if existing:
-        raise HTTPException(status_code=400, detail="Quiz already attempted.")
+    attempt = db.query(StudentQuiz).filter_by(student_id=data.student_id, quiz_id=data.quiz_id).first()
+    if not attempt:
+        raise HTTPException(status_code=400, detail="Quiz not started")
+
+    if attempt.submitted_at:
+        raise HTTPException(status_code=400, detail="Quiz already submitted")
 
     now = datetime.now(timezone.utc).isoformat()
-    attempt = StudentQuiz(
-        student_id=data.student_id,
-        quiz_id=data.quiz_id,
-        started_at=now,
-        submitted_at=now,
-        total_score=0
-    )
-    db.add(attempt)
-    db.commit()
-    db.refresh(attempt)
+    attempt.submitted_at = now
+
+    quiz = db.query(Quiz).filter_by(id=data.quiz_id).first()
+    ordered_entries = db.query(StudentQuizQuestionOrder).filter_by(student_quiz_id=attempt.id).all()
 
     raw_score = 0
     max_raw_score = 0
 
-    quiz = db.query(Quiz).filter_by(id=data.quiz_id).first()
-    quiz_questions = db.query(QuizQuestion).filter_by(quiz_id=data.quiz_id).all()
-
-    for qq in quiz_questions:
-        q = db.query(Question).filter_by(id=qq.question_id).first()
+    for entry in ordered_entries:
+        q = db.query(Question).filter_by(id=entry.question_id).first()
+        qq = db.query(QuizQuestion).filter_by(quiz_id=data.quiz_id, question_id=q.id).first()
         given = data.answers.get(q.id)
 
         if given is None:
@@ -52,10 +48,9 @@ def submit_quiz(data: AnswerSubmission):
 
         correct = q.correct_answer
         is_correct = False
-        marks = qq.mark if qq.mark is not None else 1  # Default mark = 1
+        marks = qq.mark if qq and qq.mark is not None else 1
         max_raw_score += marks
 
-        # --- Correctness logic ---
         if q.question_type == "FILL_BLANK":
             correct_vals = json.loads(correct or "[]")
             is_correct = given.strip().lower() in [x.lower() for x in correct_vals]
@@ -75,19 +70,17 @@ def submit_quiz(data: AnswerSubmission):
         awarded = marks if is_correct else 0
         raw_score += awarded
 
-        ans = StudentAnswer(
+        db.add(StudentAnswer(
             student_quiz_id=attempt.id,
             question_id=q.id,
             given_answer=given,
             is_correct=is_correct,
             marks_awarded=awarded
-        )
-        db.add(ans)
+        ))
 
-    # Scale score to quiz.total_marks
     scaled_score = round((raw_score / max_raw_score) * quiz.total_marks, 2) if max_raw_score > 0 else 0
-
     attempt.total_score = scaled_score
+
     db.commit()
     db.close()
 
@@ -95,7 +88,6 @@ def submit_quiz(data: AnswerSubmission):
         "message": "Quiz submitted!",
         "score": scaled_score
     }
-
 
 @router.get("/list/{student_id}")
 def list_quizzes(student_id: int):
@@ -118,15 +110,14 @@ def list_quizzes(student_id: int):
             "total_marks": quiz.total_marks,
             "attempted": attempted is not None,
             "score": attempted.total_score if attempted else None,
-            "status": quiz.status
+            "status": quiz.status.value
         }
 
-        if attempted:
-            if quiz.status == QuizStatus.COMPLETED:
+        if quiz.status == QuizStatus.COMPLETED:
+            if attempted:
                 scores = db.query(StudentQuiz).filter_by(quiz_id=quiz.id).order_by(StudentQuiz.total_score.desc()).all()
                 rank = next((i+1 for i, s in enumerate(scores) if s.student_id == student_id), None)
                 item["position"] = rank
-                #print(f"Student {student_id} rank for quiz {quiz.id}: {rank}")
             completed.append(item)
         elif quiz.start_time > now:
             upcoming.append(item)
@@ -140,29 +131,31 @@ def list_quizzes(student_id: int):
         "completed": completed
     }
 
-@router.get("/quiz/{quiz_id}/questions")
-def get_quiz_questions(quiz_id: int):
+@router.get("/quiz/{quiz_id}/questions/{student_id}")
+def get_ordered_questions(quiz_id: int, student_id: int):
     db: Session = SessionLocal()
+
     quiz = db.query(Quiz).filter_by(id=quiz_id, is_active=True).first()
     if not quiz:
         db.close()
         raise HTTPException(status_code=404, detail="Quiz not found")
 
+    attempt = db.query(StudentQuiz).filter_by(quiz_id=quiz_id, student_id=student_id).first()
+    if not attempt:
+        db.close()
+        raise HTTPException(status_code=400, detail="Quiz not started")
+
+    question_order = db.query(StudentQuizQuestionOrder).filter_by(student_quiz_id=attempt.id).order_by(StudentQuizQuestionOrder.position).all()
+
     questions_data = []
-    quiz_questions = db.query(QuizQuestion).filter_by(quiz_id=quiz_id).all()
-
-    for qq in quiz_questions:
-        q = db.query(Question).filter_by(id=qq.question_id).first()
-        options = []
-        if q.question_type in ["MCQ", "MULTI_SELECT", "TRUE_FALSE"]:
-            opts = db.query(Option).filter_by(question_id=q.id).all()
-            options = [{"text": o.text} for o in opts]
-
+    for entry in question_order:
+        q = db.query(Question).filter_by(id=entry.question_id).first()
+        opts = db.query(Option).filter_by(question_id=q.id).all() if q.question_type in ["MCQ", "MULTI_SELECT", "TRUE_FALSE"] else []
         questions_data.append({
             "question_id": q.id,
             "question_text": q.question_text,
             "question_type": q.question_type,
-            "options": options
+            "options": [{"text": o.text} for o in opts]
         })
 
     db.close()
@@ -217,9 +210,8 @@ def get_quiz_summary(quiz_id: int, student_id: int):
             "correct_answer": correct,
             "your_answer": a.given_answer,
             "is_correct": a.is_correct,
-            "feedback": q.feedback  # ✅ Add this line if `feedback` field exists in Question model
+            "feedback": q.feedback
         })
-
 
     db.close()
     return {
@@ -242,3 +234,45 @@ def login(data: LoginData):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     return {"id": user.id, "name": user.name, "email": user.email}
+
+@router.post("/start_quiz/{quiz_id}/{student_id}")
+def start_quiz(quiz_id: int, student_id: int):
+    db: Session = SessionLocal()
+
+    quiz = db.query(Quiz).filter_by(id=quiz_id).first()
+    if quiz.status == QuizStatus.COMPLETED:
+        db.close()
+        raise HTTPException(status_code=403, detail="Quiz is already marked as completed.")
+
+    existing = db.query(StudentQuiz).filter_by(student_id=student_id, quiz_id=quiz_id).first()
+    if existing:
+        db.close()
+        return {"message": "Quiz already started"}
+
+    now = datetime.now(timezone.utc).isoformat()
+    student_quiz = StudentQuiz(
+        student_id=student_id,
+        quiz_id=quiz_id,
+        started_at=now,
+        submitted_at=None,
+        total_score=0
+    )
+    db.add(student_quiz)
+    db.commit()
+    db.refresh(student_quiz)
+
+    quiz_questions = db.query(QuizQuestion).filter_by(quiz_id=quiz_id).all()
+    question_ids = [qq.question_id for qq in quiz_questions]
+    if quiz.random_order:
+        random.shuffle(question_ids)
+
+    for pos, qid in enumerate(question_ids):
+        db.add(StudentQuizQuestionOrder(
+            student_quiz_id=student_quiz.id,
+            question_id=qid,
+            position=pos
+        ))
+
+    db.commit()
+    db.close()
+    return {"message": "Quiz started"}
