@@ -3,12 +3,13 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Question, Option, Category, Subcategory, Quiz, QuizStatus, QuizQuestion, User, AssignedQuiz
-from schemas.teacher_schemas import QuestionCreateSchema, QuizCreateSchema, AssignQuestionsSchema
+from schemas.teacher_schemas import QuestionCreateSchema, QuizCreateSchema, AssignQuestionsSchema, UserCreateSchema
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy import text
 from datetime import datetime
-
+import csv
+import codecs
 
 
 router = APIRouter(prefix="/teacher", tags=["Teacher"])
@@ -322,3 +323,65 @@ def export_gift_format(
         lines.append(gift_line)
 
     return "\n".join(lines)
+
+@router.post("/add_user")
+def add_user(user: UserCreateSchema, db: Session = Depends(get_db)):
+    if db.query(User).filter(User.email == user.email).first():
+        raise HTTPException(status_code=400, detail="Email already exists")
+
+    new_user = User(
+        name=user.name,
+        email=user.email,
+        password=user.password,
+        role=user.role,
+        college=user.college,
+        batch=user.batch,
+        semester=user.semester
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return {"message": "User added successfully", "user_id": new_user.id}
+
+@router.post("/bulk_upload_users")
+def bulk_upload_users(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    reader = csv.DictReader(codecs.iterdecode(file.file, 'utf-8'))
+
+    created = 0
+    failed = 0
+    for row in reader:
+        try:
+            user = User(
+                name=row["name"],
+                email=row["email"],
+                password=row["password"],  # Plain text for now
+                role=row["role"],
+                college=row.get("college"),
+                batch=row.get("batch"),
+                semester=row.get("semester")
+            )
+            db.add(user)
+            created += 1
+        except Exception as e:
+            print(f"Failed to add {row.get('email')}: {e}")
+            failed += 1
+
+    db.commit()
+    return {"created": created, "failed": failed}
+
+@router.post("/login")
+def login(data: dict, db: Session = Depends(get_db)):
+    email = data.get("email")
+    password = data.get("password")
+
+    user = db.query(User).filter(User.email == email).first()
+
+    if not user or user.password != password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    return {
+        "id": user.id,
+        "name": user.name,
+        "email": user.email,
+        "role": user.role  # ✅ Make sure this line exists
+    }

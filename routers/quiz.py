@@ -5,8 +5,9 @@ from typing import List, Dict
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from database import SessionLocal
-from models import Quiz, QuizQuestion, Question, Option, StudentQuiz, StudentAnswer, AssignedQuiz, QuizStatus
+from models import User, Quiz, QuizQuestion, Question, Option, StudentQuiz, StudentAnswer, AssignedQuiz, QuizStatus
 from datetime import datetime, timezone
+from schemas.quiz_schemas import LoginData
 import json
 
 router = APIRouter()
@@ -215,8 +216,10 @@ def get_quiz_summary(quiz_id: int, student_id: int):
             "question": q.question_text,
             "correct_answer": correct,
             "your_answer": a.given_answer,
-            "is_correct": a.is_correct
+            "is_correct": a.is_correct,
+            "feedback": q.feedback  # ✅ Add this line if `feedback` field exists in Question model
         })
+
 
     db.close()
     return {
@@ -228,3 +231,14 @@ def get_quiz_summary(quiz_id: int, student_id: int):
         "median_marks": median,
         "answers": answer_list
     }
+
+@router.post("/login")
+def login(data: LoginData):
+    db: Session = SessionLocal()
+    user = db.query(User).filter_by(email=data.email).first()
+    db.close()
+
+    if not user or user.password != data.password:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    return {"id": user.id, "name": user.name, "email": user.email}

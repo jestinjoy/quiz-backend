@@ -29,3 +29,12 @@ class QuizCreateSchema(BaseModel):
 class AssignQuestionsSchema(BaseModel):
     quiz_id: int
     question_ids: List[int]
+
+class UserCreateSchema(BaseModel):
+    name: str
+    email: str
+    password: str
+    role: str  # teacher or student
+    college: str
+    batch: str
+    semester: str
