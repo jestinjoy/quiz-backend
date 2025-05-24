@@ -15,6 +15,7 @@ class User(Base):
     password = Column(String, nullable=False)
     role = Column(String, nullable=False)  # 'student' or 'teacher'
     college = Column(String, nullable=True)
+    course = Column(String, nullable=True)
     batch = Column(String, nullable=True)
     semester = Column(String, nullable=True)
 
@@ -63,6 +64,7 @@ class Quiz(Base):
     created_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(String, nullable=False)
     start_time = Column(String, nullable=True)
+    quiz_end_time = Column(String, nullable=True)
     is_active = Column(Boolean, default=True)
     status = Column(SqlEnum(QuizStatus), default=QuizStatus.ACTIVE)
     random_order = Column(Boolean, default=False)

@@ -25,6 +25,7 @@ class QuizCreateSchema(BaseModel):
     status: str
     created_by: int
     created_at: str
+    quiz_end_time: Optional[str] = None
     random_order: Optional[bool] = False  # ✅ NEW FIELD
     
 class AssignQuestionsSchema(BaseModel):
@@ -35,7 +36,8 @@ class UserCreateSchema(BaseModel):
     name: str
     email: str
     password: str
-    role: str  # teacher or student
-    college: str
-    batch: str
-    semester: str
+    role: str
+    college: Optional[str] = None
+    batch: Optional[str] = None
+    semester: Optional[str] = None
+    course: Optional[str] = None  # ✅ Add this line

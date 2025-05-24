@@ -100,8 +100,13 @@ def list_quizzes(student_id: int):
     active, upcoming, completed = [], [], []
 
     for quiz in quizzes:
-        attempted = db.query(StudentQuiz).filter_by(student_id=student_id, quiz_id=quiz.id).first()
+        # ✅ Auto-complete if past end time and still ACTIVE
+        if quiz.quiz_end_time and quiz.status == QuizStatus.ACTIVE:
+            if quiz.quiz_end_time < now:
+                quiz.status = QuizStatus.COMPLETED
+                db.commit()
 
+        attempted = db.query(StudentQuiz).filter_by(student_id=student_id, quiz_id=quiz.id).first()
         item = {
             "quiz_id": quiz.id,
             "title": quiz.title,
@@ -110,11 +115,11 @@ def list_quizzes(student_id: int):
             "total_marks": quiz.total_marks,
             "attempted": attempted is not None,
             "score": attempted.total_score if attempted else None,
-            "status": quiz.status.value
+            "status": quiz.status
         }
 
-        if quiz.status == QuizStatus.COMPLETED:
-            if attempted:
+        if attempted:
+            if quiz.status == QuizStatus.COMPLETED:
                 scores = db.query(StudentQuiz).filter_by(quiz_id=quiz.id).order_by(StudentQuiz.total_score.desc()).all()
                 rank = next((i+1 for i, s in enumerate(scores) if s.student_id == student_id), None)
                 item["position"] = rank
@@ -122,7 +127,10 @@ def list_quizzes(student_id: int):
         elif quiz.start_time > now:
             upcoming.append(item)
         else:
-            active.append(item)
+            if quiz.status == QuizStatus.COMPLETED:
+                completed.append(item)
+            else:
+                active.append(item)
 
     db.close()
     return {
