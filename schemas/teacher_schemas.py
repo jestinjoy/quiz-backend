@@ -41,3 +41,16 @@ class UserCreateSchema(BaseModel):
     batch: Optional[str] = None
     semester: Optional[str] = None
     course: Optional[str] = None  # ✅ Add this line
+
+class CategoryCreateSchema(BaseModel):
+    name: str
+
+class OptionUpdate(BaseModel):
+    id: int
+    text: str
+    is_correct: bool
+
+class QuestionUpdateSchema(BaseModel):
+    question_text: str
+    feedback: Optional[str] = None
+    options: List[OptionUpdate]  # For MCQ

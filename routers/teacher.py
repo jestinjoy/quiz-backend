@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, Query, HTTPException, Path, Body, Upload
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 from database import SessionLocal
-from models import Question, Option, Category, Subcategory, Quiz, QuizStatus, QuizQuestion, User, AssignedQuiz
-from schemas.teacher_schemas import QuestionCreateSchema, QuizCreateSchema, AssignQuestionsSchema, UserCreateSchema
+from models import Question, Option, Category, Subcategory, Quiz, QuizStatus, QuizQuestion, User, AssignedQuiz, StudentQuiz
+from schemas.teacher_schemas import QuestionCreateSchema, QuizCreateSchema, QuestionUpdateSchema, UserCreateSchema, CategoryCreateSchema
 from pydantic import BaseModel
 from typing import List, Optional
 from sqlalchemy import text
@@ -88,7 +88,7 @@ def create_quiz(data: QuizCreateSchema, db: Session = Depends(get_db)):
         start_time=data.start_time,
         quiz_end_time=data.quiz_end_time,
         is_active=data.is_active,
-        status=data.status,
+        status=QuizStatus[data.status],
         created_by=data.created_by,
         created_at=data.created_at,
         random_order=data.random_order
@@ -108,8 +108,19 @@ def assign_questions(data: dict, db: Session = Depends(get_db)):
     return {"message": "Questions assigned to quiz successfully."}
 
 @router.get("/students")
-def get_students(db: Session = Depends(get_db)):
-    return db.query(User).filter(User.role == "student").all()
+def get_students(
+    semester: Optional[int] = Query(None),
+    batch: Optional[int] = Query(None),
+    db: Session = Depends(get_db)
+):
+    query = db.query(User).filter(User.role == "student")
+    if semester is not None:
+        query = query.filter(User.semester == semester)
+    if batch is not None:
+        query = query.filter(User.batch == batch)
+    return query.all()
+
+
 
 @router.post("/assign_students/{quiz_id}")
 def assign_students(quiz_id: int = Path(...), data: dict = None, db: Session = Depends(get_db)):
@@ -122,25 +133,30 @@ def assign_students(quiz_id: int = Path(...), data: dict = None, db: Session = D
     return {"message": f"{len(student_ids)} students assigned to quiz {quiz_id}."}
 
 @router.get("/quizzes")
-def get_quizzes_by_teacher(created_by: Optional[int] = Query(None), include_creator: bool = Query(False), db: Session = Depends(get_db)):
-    query = db.query(Quiz)
-    if created_by:
-        query = query.filter(Quiz.created_by == created_by)
-    quizzes = query.order_by(Quiz.created_at.desc()).all()
-    result = []
-    for q in quizzes:
-        creator = db.query(User).filter(User.id == q.created_by).first() if include_creator else None
-        result.append({
-            "id": q.id,
-            "title": q.title,
-            "total_marks": q.total_marks,
-            "duration_minutes": q.duration_minutes,
-            "is_active": q.is_active,
-            "status": q.status.value,
-            "created_by": q.created_by,
-            "created_by_name": creator.name if creator else None
+def get_quizzes(include_creator: bool = False, db: Session = Depends(get_db)):
+    quizzes = db.query(Quiz).all()
+    response = []
+    for quiz in quizzes:
+        creator_name = None
+        if include_creator:
+            creator = db.query(User).filter(User.id == quiz.created_by).first()
+            creator_name = creator.name if creator else None
+
+        attempted = db.query(StudentQuiz).filter_by(quiz_id=quiz.id).first() is not None
+
+        response.append({
+            "id": quiz.id,
+            "title": quiz.title,
+            "total_marks": quiz.total_marks,
+            "duration_minutes": quiz.duration_minutes,
+            "created_by": quiz.created_by,
+            "created_by_name": creator_name,
+            "is_active": quiz.is_active,
+            "status": quiz.status.value if hasattr(quiz.status, 'value') else quiz.status,
+            "attempted": attempted  # ✅ Add this field
         })
-    return result
+    return response
+
 
 @router.post("/toggle_quiz_status/{quiz_id}")
 def toggle_quiz_status(quiz_id: int, db: Session = Depends(get_db)):
@@ -253,17 +269,23 @@ def bulk_upload_users(file: UploadFile = File(...), db: Session = Depends(get_db
     for row in reader:
         try:
             user = User(
-                name=row["name"], email=row["email"], password=row["password"],
-                role=row["role"], college=row.get("college"), batch=row.get("batch"),
-                semester=row.get("semester"), course=row.get("course")
+                name=row["name"],
+                email=row["email"],
+                password=row["password"],  # 🔒 Consider hashing
+                role=row["role"],
+                college=row.get("college"),
+                batch=row.get("batch"),
+                semester=row.get("semester"),
+                course=row.get("course")  # ✅ NEW FIELD
             )
             db.add(user)
             created += 1
         except Exception as e:
-            print(f"Failed to add {row.get('email')}: {e}")
+            print(f"Failed to add {row.get('email', '[no email]')}: {e}")
             failed += 1
     db.commit()
     return {"created": created, "failed": failed}
+
 
 @router.post("/login")
 def login(data: dict, db: Session = Depends(get_db)):
@@ -276,10 +298,11 @@ def login(data: dict, db: Session = Depends(get_db)):
 
 # CRUD for category
 @router.post("/category")
-def create_category(name: str = Body(...), db: Session = Depends(get_db)):
-    if db.query(Category).filter(Category.name == name).first():
+def create_category(data: CategoryCreateSchema, db: Session = Depends(get_db)):
+    if db.query(Category).filter(Category.name == data.name).first():
         raise HTTPException(status_code=400, detail="Category already exists")
-    cat = Category(name=name)
+
+    cat = Category(name=data.name)
     db.add(cat)
     db.commit()
     db.refresh(cat)
@@ -328,3 +351,133 @@ def delete_subcategory(id: int, db: Session = Depends(get_db)):
     db.delete(sub)
     db.commit()
     return {"message": "Deleted"}
+
+@router.get("/quiz_report/{quiz_id}")
+def quiz_report(quiz_id: int, db: Session = Depends(get_db)):
+    quiz = db.query(Quiz).filter(Quiz.id == quiz_id).first()
+    if not quiz:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+    
+    creator = db.query(User).filter(User.id == quiz.created_by).first()
+
+    results = db.execute(text("""
+        SELECT u.id, u.name, u.email, sq.total_score
+        FROM users u
+        JOIN student_quizzes sq ON u.id = sq.student_id
+        WHERE sq.quiz_id = :quiz_id
+    """), {"quiz_id": quiz_id}).fetchall()
+
+    scores = [r.total_score for r in results if r.total_score is not None]
+    summary = {
+        "quiz_id": quiz.id,
+        "title": quiz.title,
+        "faculty": creator.name if creator else "N/A",
+        "start_time": quiz.start_time,
+        "total_marks": quiz.total_marks,
+        "students_attempted": len(scores),
+        "maximum": max(scores) if scores else 0,
+        "minimum": min(scores) if scores else 0,
+        "average": round(sum(scores) / len(scores), 2) if scores else 0,
+        "median": sorted(scores)[len(scores)//2] if scores else 0
+    }
+
+    student_marks = [{"id": r.id, "name": r.name, "mark": r.total_score} for r in results]
+    return {"summary": summary, "results": student_marks}
+
+@router.get("/users")
+def get_users(
+    role: Optional[str] = Query(None),
+    batch: Optional[int] = Query(None),
+    semester: Optional[int] = Query(None),
+    college: Optional[str] = Query(None),
+    db: Session = Depends(get_db)
+):
+    query = db.query(User)
+    if role:
+        query = query.filter(User.role == role)
+    if batch:
+        query = query.filter(User.batch == batch)
+    if semester:
+        query = query.filter(User.semester == semester)
+    if college:
+        query = query.filter(User.college == college)
+    return query.all()
+
+@router.put("/update_user/{user_id}")
+def update_user(user_id: int, data: dict, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    for key, value in data.items():
+        if hasattr(user, key):
+            setattr(user, key, value)
+    db.commit()
+    return {"message": "User updated successfully"}
+
+@router.delete("/delete_quiz/{quiz_id}")
+def delete_quiz(quiz_id: int, db: Session = Depends(get_db)):
+    # Check if any students have attempted the quiz
+    attempts = db.query(StudentQuiz).filter_by(quiz_id=quiz_id).first()
+    if attempts:
+        raise HTTPException(status_code=400, detail="Quiz has been attempted and cannot be deleted.")
+
+    # Delete related quiz questions
+    db.query(QuizQuestion).filter_by(quiz_id=quiz_id).delete()
+
+    # Delete assigned students
+    db.query(AssignedQuiz).filter_by(quiz_id=quiz_id).delete()
+
+    # Delete the quiz itself
+    quiz = db.query(Quiz).filter_by(id=quiz_id).first()
+    if quiz:
+        db.delete(quiz)
+        db.commit()
+        return {"message": "Quiz deleted successfully."}
+    else:
+        raise HTTPException(status_code=404, detail="Quiz not found")
+
+
+@router.put("/update_question/{question_id}")
+def update_question(
+    question_id: int,
+    data: QuestionUpdateSchema,
+    db: Session = Depends(get_db)
+):
+    question = db.query(Question).filter(Question.id == question_id).first()
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    # Update question text and feedback
+    question.question_text = data.question_text
+    question.feedback = data.feedback
+    db.commit()
+
+    # Update each MCQ option
+    for opt_data in data.options:
+        option = db.query(Option).filter(
+            Option.id == opt_data.id,
+            Option.question_id == question_id
+        ).first()
+        if option:
+            option.text = opt_data.text
+            option.is_correct = opt_data.is_correct
+
+    db.commit()
+    return {"message": "Question updated successfully"}
+
+@router.get("/get_question/{question_id}")
+def get_question(question_id: int, db: Session = Depends(get_db)):
+    question = db.query(Question).filter(Question.id == question_id).first()
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    return {
+        "id": question.id,
+        "question_text": question.question_text,
+        "feedback": question.feedback,
+        "options": [
+            {"id": o.id, "text": o.text, "is_correct": o.is_correct}
+            for o in sorted(question.options, key=lambda x: x.id)
+        ]
+    }
